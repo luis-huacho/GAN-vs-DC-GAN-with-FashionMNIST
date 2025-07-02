@@ -119,7 +119,8 @@ class DCDiscriminator(nn.Module):
             nn.BatchNorm2d(features_d * 4),
             nn.LeakyReLU(0.2, inplace=True),
             # Estado: (features_d*4) x 6 x 6
-            nn.Conv2d(features_d * 4, 1, 7, 1, 0, bias=False),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Conv2d(features_d * 4, 1, 1, 1, 0, bias=False),
             nn.Sigmoid()
             # Salida: 1 x 1 x 1
         )
