@@ -25,6 +25,10 @@ Z_DIM = 100
 IMAGE_SIZE = 28
 BETA1 = 0.5
 
+# Hiperparámetros específicos para DC-GAN
+DC_FEATURES_G = 32  # Reducir para Fashion-MNIST
+DC_FEATURES_D = 32
+
 
 class MLPGenerator(nn.Module):
     """Generador basado en capas completamente conectadas (MLP)"""
@@ -88,7 +92,7 @@ class DCGenerator(nn.Module):
             nn.BatchNorm2d(features_g),
             nn.ReLU(True),
             # Estado: (features_g) x 16 x 16
-            nn.ConvTranspose2d(features_g, img_channels, 4, 2, 2, bias=False),
+            nn.ConvTranspose2d(features_g, img_channels, 4, 2, 1, bias=False),  # CORREGIDO: padding=1
             nn.Tanh()
             # Salida: img_channels x 28 x 28
         )
@@ -121,7 +125,7 @@ class DCDiscriminator(nn.Module):
         )
 
     def forward(self, img):
-        return self.model(img).view(-1, 1).squeeze(1)
+        return self.model(img).view(-1)  # CORREGIDO: simplificado
 
 
 def weights_init(m):
@@ -153,9 +157,14 @@ def train_gan(generator, discriminator, dataloader, model_name, epochs=NUM_EPOCH
     """Función de entrenamiento para ambos tipos de GAN"""
     print(f"\n=== Entrenando {model_name} ===")
 
-    # Optimizadores
-    optim_g = optim.Adam(generator.parameters(), lr=LEARNING_RATE, betas=(BETA1, 0.999))
-    optim_d = optim.Adam(discriminator.parameters(), lr=LEARNING_RATE, betas=(BETA1, 0.999))
+    # Optimizadores con learning rates diferenciados para DC-GAN
+    if model_name == "DC-GAN":
+        optim_g = optim.Adam(generator.parameters(), lr=LEARNING_RATE * 0.5, betas=(BETA1, 0.999))
+        optim_d = optim.Adam(discriminator.parameters(), lr=LEARNING_RATE * 0.8, betas=(BETA1, 0.999))
+        print(f"DC-GAN: LR Generador={LEARNING_RATE * 0.5:.5f}, LR Discriminador={LEARNING_RATE * 0.8:.5f}")
+    else:
+        optim_g = optim.Adam(generator.parameters(), lr=LEARNING_RATE, betas=(BETA1, 0.999))
+        optim_d = optim.Adam(discriminator.parameters(), lr=LEARNING_RATE, betas=(BETA1, 0.999))
 
     # Función de pérdida
     criterion = nn.BCELoss()
@@ -210,27 +219,62 @@ def train_gan(generator, discriminator, dataloader, model_name, epochs=NUM_EPOCH
             loss_d.backward()
             optim_d.step()
 
-            # ============ Entrenar Generador ============
-            generator.zero_grad()
+            # ============ Entrenar Generador (Múltiples pasos para DC-GAN) ============
+            generator_steps = 2 if model_name == "DC-GAN" else 1
 
-            if model_name == "MLP-GAN":
-                fake_imgs_flat = fake_imgs.view(batch_size, -1)
-                output = discriminator(fake_imgs_flat).view(-1)
-            else:
-                output = discriminator(fake_imgs).view(-1)
+            for _ in range(generator_steps):
+                generator.zero_grad()
 
-            loss_g = criterion(output, real_label)
-            loss_g.backward()
-            optim_g.step()
+                # Generar nuevo ruido para cada paso del generador
+                noise = torch.randn(batch_size, Z_DIM, device=device)
+                if model_name == "DC-GAN":
+                    noise = noise.view(batch_size, Z_DIM, 1, 1)
+
+                fake_imgs = generator(noise)
+
+                if model_name == "MLP-GAN":
+                    fake_imgs_flat = fake_imgs.view(batch_size, -1)
+                    output = discriminator(fake_imgs_flat).view(-1)
+                else:
+                    output = discriminator(fake_imgs).view(-1)
+
+                loss_g = criterion(output, real_label)
+                loss_g.backward()
+                optim_g.step()
 
             # Guardar pérdidas
             if i % 100 == 0:
                 g_losses.append(loss_g.item())
                 d_losses.append(loss_d.item())
 
-        # Imprimir progreso
+        # Imprimir progreso con diagnóstico mejorado
         if epoch % 10 == 0:
             print(f'Época [{epoch}/{epochs}] - Loss D: {loss_d.item():.4f}, Loss G: {loss_g.item():.4f}')
+
+            # Diagnóstico adicional específico para DC-GAN
+            if model_name == "DC-GAN":
+                with torch.no_grad():
+                    test_noise = torch.randn(4, Z_DIM, 1, 1, device=device)
+                    test_imgs = generator(test_noise)
+                    img_stats = {
+                        'min': test_imgs.min().item(),
+                        'max': test_imgs.max().item(),
+                        'mean': test_imgs.mean().item(),
+                        'std': test_imgs.std().item()
+                    }
+                    print(
+                        f'    Estadísticas IMG: min={img_stats["min"]:.3f}, max={img_stats["max"]:.3f}, mean={img_stats["mean"]:.3f}')
+
+                    # Verificar si hay saturación
+                    if abs(img_stats["mean"]) > 0.8:
+                        print(f'    ⚠️ Advertencia: Posible saturación en las imágenes generadas')
+
+                    # Verificar equilibrio de pérdidas
+                    loss_ratio = loss_g.item() / max(loss_d.item(), 1e-8)
+                    if loss_ratio > 10:
+                        print(f'    ⚠️ Advertencia: Discriminador demasiado fuerte (ratio G/D: {loss_ratio:.2f})')
+                    elif loss_ratio < 0.1:
+                        print(f'    ⚠️ Advertencia: Generador demasiado fuerte (ratio G/D: {loss_ratio:.2f})')
 
     # Generar imágenes finales
     with torch.no_grad():
@@ -313,15 +357,23 @@ def main():
 
     # ================ ENTRENAR DC-GAN ================
     print("\n" + "=" * 50)
-    print("ENTRENANDO DC-GAN")
+    print("ENTRENANDO DC-GAN CON CORRECCIONES")
     print("=" * 50)
 
-    dc_gen = DCGenerator(Z_DIM).to(device)
-    dc_disc = DCDiscriminator().to(device)
+    # Usar hiperparámetros específicos para DC-GAN
+    dc_gen = DCGenerator(Z_DIM, features_g=DC_FEATURES_G).to(device)
+    dc_disc = DCDiscriminator(features_d=DC_FEATURES_D).to(device)
 
-    # Aplicar inicialización de pesos
+    # Aplicar inicialización de pesos con verificación
+    print("Aplicando inicialización de pesos DC-GAN...")
     dc_gen.apply(weights_init)
     dc_disc.apply(weights_init)
+    print("Inicialización completada.")
+
+    # Mostrar información de la arquitectura
+    dc_gen_params = sum(p.numel() for p in dc_gen.parameters())
+    dc_disc_params = sum(p.numel() for p in dc_disc.parameters())
+    print(f"Parámetros DC-GAN: Generador={dc_gen_params:,}, Discriminador={dc_disc_params:,}")
 
     dc_g_losses, dc_d_losses, dc_fake_imgs = train_gan(
         dc_gen, dc_disc, dataloader, "DC-GAN"
@@ -360,6 +412,16 @@ def main():
     plt.tight_layout()
     plt.savefig('results/comparison.png', dpi=300, bbox_inches='tight')
     plt.show()
+
+    # Estadísticas finales
+    print("\n📊 ESTADÍSTICAS FINALES:")
+    print(f"MLP-GAN - Pérdida final G: {mlp_g_losses[-1]:.4f}, D: {mlp_d_losses[-1]:.4f}")
+    print(f"DC-GAN  - Pérdida final G: {dc_g_losses[-1]:.4f}, D: {dc_d_losses[-1]:.4f}")
+
+    # Análisis de estabilidad
+    mlp_g_std = np.std(mlp_g_losses[-10:])
+    dc_g_std = np.std(dc_g_losses[-10:])
+    print(f"Estabilidad G (std últimas 10): MLP={mlp_g_std:.4f}, DC={dc_g_std:.4f}")
 
     # Guardar modelos entrenados
     torch.save(mlp_gen.state_dict(), 'results/mlp_generator.pth')
