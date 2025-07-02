@@ -41,25 +41,35 @@ class MLPGenerator(nn.Module):
 
 
 class DCGenerator(nn.Module):
-    """Generador DC-GAN para Fashion-MNIST"""
+    """Generador DC-GAN corregido para Fashion-MNIST 28x28"""
+
     def __init__(self, z_dim=Z_DIM, img_channels=1, features_g=64):
         super(DCGenerator, self).__init__()
-        self.model = nn.Sequential(
-            nn.ConvTranspose2d(z_dim, features_g * 4, 4, 1, 0, bias=False),
+        
+        self.main = nn.Sequential(
+            # Entrada: z_dim x 1 x 1
+            nn.ConvTranspose2d(z_dim, features_g * 8, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(features_g * 8),
+            nn.ReLU(True),
+            # Estado: (features_g*8) x 4 x 4
+            
+            nn.ConvTranspose2d(features_g * 8, features_g * 4, 4, 2, 1, bias=False),
             nn.BatchNorm2d(features_g * 4),
             nn.ReLU(True),
+            # Estado: (features_g*4) x 8 x 8
+            
             nn.ConvTranspose2d(features_g * 4, features_g * 2, 4, 2, 1, bias=False),
             nn.BatchNorm2d(features_g * 2),
             nn.ReLU(True),
-            nn.ConvTranspose2d(features_g * 2, features_g, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(features_g),
-            nn.ReLU(True),
-            nn.ConvTranspose2d(features_g, img_channels, 4, 2, 1, bias=False),
+            # Estado: (features_g*2) x 16 x 16
+            
+            nn.ConvTranspose2d(features_g * 2, img_channels, 4, 2, 3, bias=False),
             nn.Tanh()
+            # Salida: img_channels x 28 x 28
         )
 
-    def forward(self, z):
-        return self.model(z)
+    def forward(self, input):
+        return self.main(input)
 
 
 # ================= FUNCIONES =================

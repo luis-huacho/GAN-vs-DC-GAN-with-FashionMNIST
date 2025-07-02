@@ -70,7 +70,8 @@ class MLPDiscriminator(nn.Module):
         )
 
     def forward(self, img):
-        return self.model(img)
+        output = self.model(img)
+        return output.view(img.size(0))  # Ensure output shape is (batch_size,)
 
 
 class DCGenerator(nn.Module):
@@ -96,7 +97,7 @@ class DCGenerator(nn.Module):
             nn.ReLU(True),
             # Estado: (features_g*2) x 16 x 16
             
-            nn.ConvTranspose2d(features_g * 2, img_channels, 4, 2, 2, bias=False),
+            nn.ConvTranspose2d(features_g * 2, img_channels, 4, 2, 3, bias=False),
             nn.Tanh()
             # Salida: img_channels x 28 x 28
         )
