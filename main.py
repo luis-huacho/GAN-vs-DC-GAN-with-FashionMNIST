@@ -74,58 +74,68 @@ class MLPDiscriminator(nn.Module):
 
 
 class DCGenerator(nn.Module):
-    """Generador DC-GAN con capas convolucionales transpuestas"""
+    """Generador DC-GAN corregido para Fashion-MNIST 28x28"""
 
     def __init__(self, z_dim=100, img_channels=1, features_g=64):
         super(DCGenerator, self).__init__()
-        self.model = nn.Sequential(
+        
+        self.main = nn.Sequential(
             # Entrada: z_dim x 1 x 1
-            nn.ConvTranspose2d(z_dim, features_g * 4, 4, 1, 0, bias=False),
+            nn.ConvTranspose2d(z_dim, features_g * 8, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(features_g * 8),
+            nn.ReLU(True),
+            # Estado: (features_g*8) x 4 x 4
+            
+            nn.ConvTranspose2d(features_g * 8, features_g * 4, 4, 2, 1, bias=False),
             nn.BatchNorm2d(features_g * 4),
             nn.ReLU(True),
-            # Estado: (features_g*4) x 4 x 4
+            # Estado: (features_g*4) x 8 x 8
+            
             nn.ConvTranspose2d(features_g * 4, features_g * 2, 4, 2, 1, bias=False),
             nn.BatchNorm2d(features_g * 2),
             nn.ReLU(True),
-            # Estado: (features_g*2) x 8 x 8
-            nn.ConvTranspose2d(features_g * 2, features_g, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(features_g),
-            nn.ReLU(True),
-            # Estado: (features_g) x 16 x 16
-            nn.ConvTranspose2d(features_g, img_channels, 4, 2, 1, bias=False),  # CORREGIDO: padding=1
+            # Estado: (features_g*2) x 16 x 16
+            
+            nn.ConvTranspose2d(features_g * 2, img_channels, 4, 2, 2, bias=False),
             nn.Tanh()
             # Salida: img_channels x 28 x 28
         )
 
-    def forward(self, z):
-        return self.model(z)
+    def forward(self, input):
+        return self.main(input)
 
 
 class DCDiscriminator(nn.Module):
-    """Discriminador DC-GAN con capas convolucionales"""
+    """Discriminador DC-GAN con dimensiones corregidas para Fashion-MNIST"""
 
     def __init__(self, img_channels=1, features_d=64):
         super(DCDiscriminator, self).__init__()
-        self.model = nn.Sequential(
-            # Entrada: img_channels x 28 x 28
+        
+        self.main = nn.Sequential(
+            # Entrada: 1 x 28 x 28
             nn.Conv2d(img_channels, features_d, 4, 2, 1, bias=False),
             nn.LeakyReLU(0.2, inplace=True),
             # Estado: features_d x 14 x 14
+            
             nn.Conv2d(features_d, features_d * 2, 4, 2, 1, bias=False),
             nn.BatchNorm2d(features_d * 2),
             nn.LeakyReLU(0.2, inplace=True),
             # Estado: (features_d*2) x 7 x 7
-            nn.Conv2d(features_d * 2, features_d * 4, 7, 1, 0, bias=False),
+            
+            nn.Conv2d(features_d * 2, features_d * 4, 4, 2, 1, bias=False),
             nn.BatchNorm2d(features_d * 4),
             nn.LeakyReLU(0.2, inplace=True),
-            # Estado: (features_d*4) x 1 x 1
-            nn.Conv2d(features_d * 4, 1, 1, 1, 0, bias=False),
+            # Estado: (features_d*4) x 3 x 3
+            
+            nn.Conv2d(features_d * 4, 1, 3, 1, 0, bias=False),
             nn.Sigmoid()
             # Salida: 1 x 1 x 1
         )
 
-    def forward(self, img):
-        return self.model(img).view(-1)
+    def forward(self, input):
+        output = self.main(input)
+        # CRÍTICO: asegurar que la salida tenga dimensión (batch_size,)
+        return output.view(input.size(0))  # Reshape a (batch_size,)
 
 
 def weights_init(m):
@@ -136,6 +146,64 @@ def weights_init(m):
     elif classname.find('BatchNorm') != -1:
         nn.init.normal_(m.weight.data, 1.0, 0.02)
         nn.init.constant_(m.bias.data, 0)
+
+
+def debug_model_dimensions():
+    """Función para verificar dimensiones de los modelos"""
+    device_debug = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    print("=== DEBUGGING DIMENSIONES ===")
+    
+    # Test MLP models
+    mlp_gen = MLPGenerator(Z_DIM, IMAGE_SIZE * IMAGE_SIZE).to(device_debug)
+    mlp_disc = MLPDiscriminator(IMAGE_SIZE * IMAGE_SIZE).to(device_debug)
+    
+    # Test DC models
+    dc_gen = DCGenerator(Z_DIM, features_g=DC_FEATURES_G).to(device_debug)
+    dc_disc = DCDiscriminator(features_d=DC_FEATURES_D).to(device_debug)
+    
+    batch_size = 4
+    
+    # Test MLP
+    print("\n--- MLP-GAN ---")
+    noise_mlp = torch.randn(batch_size, Z_DIM, device=device_debug)
+    fake_mlp = mlp_gen(noise_mlp)
+    print(f"MLP Generator output: {fake_mlp.shape}")
+    
+    fake_mlp_flat = fake_mlp.view(batch_size, -1)
+    disc_out_mlp = mlp_disc(fake_mlp_flat)
+    print(f"MLP Discriminator output: {disc_out_mlp.shape}")
+    
+    # Test DC-GAN
+    print("\n--- DC-GAN ---")
+    noise_dc = torch.randn(batch_size, Z_DIM, 1, 1, device=device_debug)
+    fake_dc = dc_gen(noise_dc)
+    print(f"DC Generator output: {fake_dc.shape}")
+    
+    disc_out_dc = dc_disc(fake_dc)
+    print(f"DC Discriminator output: {disc_out_dc.shape}")
+    
+    # Verify compatibility with loss function
+    real_label = torch.ones(batch_size, device=device_debug)
+    fake_label = torch.zeros(batch_size, device=device_debug)
+    
+    print(f"\nLabel shapes: real={real_label.shape}, fake={fake_label.shape}")
+    print(f"DC Discriminator output shape: {disc_out_dc.shape}")
+    print(f"MLP Discriminator output shape: {disc_out_mlp.shape}")
+    
+    # Check if dimensions match
+    dc_match = disc_out_dc.shape == real_label.shape
+    mlp_match = disc_out_mlp.shape == real_label.shape
+    
+    print(f"\n✅ DC-GAN dimensions match: {dc_match}")
+    print(f"✅ MLP-GAN dimensions match: {mlp_match}")
+    
+    if dc_match and mlp_match:
+        print("\n🎉 VERIFICACIÓN EXITOSA - Todas las dimensiones son correctas")
+        return True
+    else:
+        print("\n❌ ERROR - Las dimensiones no coinciden")
+        return False
 
 
 def load_fashion_mnist():
@@ -198,12 +266,12 @@ def train_gan(generator, discriminator, dataloader, model_name, epochs=NUM_EPOCH
             # Pérdida con imágenes reales (con ruido para estabilidad en DC-GAN)
             if model_name == "MLP-GAN":
                 real_imgs_flat = real_imgs.view(batch_size, -1)
-                output_real = discriminator(real_imgs_flat).view(-1)
+                output_real = discriminator(real_imgs_flat)
             else:
                 # Añadir ruido mínimo para estabilidad
                 noise_factor = 0.05 * torch.randn_like(real_imgs)
                 real_imgs_noisy = real_imgs + noise_factor
-                output_real = discriminator(real_imgs_noisy).view(-1)
+                output_real = discriminator(real_imgs_noisy)
 
             loss_d_real = criterion(output_real, real_label)
 
@@ -216,9 +284,9 @@ def train_gan(generator, discriminator, dataloader, model_name, epochs=NUM_EPOCH
 
             if model_name == "MLP-GAN":
                 fake_imgs_flat = fake_imgs.view(batch_size, -1)
-                output_fake = discriminator(fake_imgs_flat.detach()).view(-1)
+                output_fake = discriminator(fake_imgs_flat.detach())
             else:
-                output_fake = discriminator(fake_imgs.detach()).view(-1)
+                output_fake = discriminator(fake_imgs.detach())
 
             loss_d_fake = criterion(output_fake, fake_label)
 
@@ -242,9 +310,9 @@ def train_gan(generator, discriminator, dataloader, model_name, epochs=NUM_EPOCH
 
                 if model_name == "MLP-GAN":
                     fake_imgs_flat = fake_imgs.view(batch_size, -1)
-                    output = discriminator(fake_imgs_flat).view(-1)
+                    output = discriminator(fake_imgs_flat)
                 else:
-                    output = discriminator(fake_imgs).view(-1)
+                    output = discriminator(fake_imgs)
 
                 loss_g = criterion(output, real_label)
                 loss_g.backward()
@@ -401,6 +469,15 @@ def main():
 
     # Crear directorio de resultados
     os.makedirs('results', exist_ok=True)
+
+    # VERIFICACIÓN: Verificar dimensiones antes del entrenamiento
+    print("\n" + "=" * 50)
+    print("VERIFICANDO DIMENSIONES DE MODELOS")
+    print("=" * 50)
+    if not debug_model_dimensions():
+        print("❌ Error en las dimensiones. Deteniendo ejecución.")
+        return
+    print("✅ Dimensiones verificadas. Procediendo con el entrenamiento...")
 
     # ================ ENTRENAR MLP-GAN ================
     print("\n" + "=" * 50)
