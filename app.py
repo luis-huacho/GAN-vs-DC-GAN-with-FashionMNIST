@@ -54,7 +54,7 @@ class DCGenerator(nn.Module):
             nn.ConvTranspose2d(features_g * 2, features_g, 4, 2, 1, bias=False),
             nn.BatchNorm2d(features_g),
             nn.ReLU(True),
-            nn.ConvTranspose2d(features_g, img_channels, 4, 2, 2, bias=False),
+            nn.ConvTranspose2d(features_g, img_channels, 4, 2, 1, bias=False),
             nn.Tanh()
         )
 

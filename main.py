@@ -26,8 +26,8 @@ IMAGE_SIZE = 28
 BETA1 = 0.5
 
 # Hiperparámetros específicos para DC-GAN
-DC_FEATURES_G = 32  # Reducir para Fashion-MNIST
-DC_FEATURES_D = 32
+DC_FEATURES_G = 64  # Aumentado para mejor capacidad
+DC_FEATURES_D = 64
 
 
 class MLPGenerator(nn.Module):
@@ -115,18 +115,17 @@ class DCDiscriminator(nn.Module):
             nn.BatchNorm2d(features_d * 2),
             nn.LeakyReLU(0.2, inplace=True),
             # Estado: (features_d*2) x 7 x 7
-            nn.Conv2d(features_d * 2, features_d * 4, 4, 1, 1, bias=False),
+            nn.Conv2d(features_d * 2, features_d * 4, 7, 1, 0, bias=False),
             nn.BatchNorm2d(features_d * 4),
             nn.LeakyReLU(0.2, inplace=True),
-            # Estado: (features_d*4) x 6 x 6
-            nn.AdaptiveAvgPool2d((1, 1)),
+            # Estado: (features_d*4) x 1 x 1
             nn.Conv2d(features_d * 4, 1, 1, 1, 0, bias=False),
             nn.Sigmoid()
             # Salida: 1 x 1 x 1
         )
 
     def forward(self, img):
-        return self.model(img).view(-1)  # CORREGIDO: simplificado
+        return self.model(img).view(-1)
 
 
 def weights_init(m):
@@ -158,14 +157,14 @@ def train_gan(generator, discriminator, dataloader, model_name, epochs=NUM_EPOCH
     """Función de entrenamiento para ambos tipos de GAN"""
     print(f"\n=== Entrenando {model_name} ===")
 
-    # Optimizadores con learning rates diferenciados para DC-GAN
+    # Optimizadores balanceados para ambos modelos
+    optim_g = optim.Adam(generator.parameters(), lr=LEARNING_RATE, betas=(BETA1, 0.999))
+    optim_d = optim.Adam(discriminator.parameters(), lr=LEARNING_RATE, betas=(BETA1, 0.999))
+    
     if model_name == "DC-GAN":
-        optim_g = optim.Adam(generator.parameters(), lr=LEARNING_RATE * 0.5, betas=(BETA1, 0.999))
-        optim_d = optim.Adam(discriminator.parameters(), lr=LEARNING_RATE * 0.8, betas=(BETA1, 0.999))
-        print(f"DC-GAN: LR Generador={LEARNING_RATE * 0.5:.5f}, LR Discriminador={LEARNING_RATE * 0.8:.5f}")
+        print(f"DC-GAN: LR Generador={LEARNING_RATE:.5f}, LR Discriminador={LEARNING_RATE:.5f}")
     else:
-        optim_g = optim.Adam(generator.parameters(), lr=LEARNING_RATE, betas=(BETA1, 0.999))
-        optim_d = optim.Adam(discriminator.parameters(), lr=LEARNING_RATE, betas=(BETA1, 0.999))
+        print(f"MLP-GAN: LR Generador={LEARNING_RATE:.5f}, LR Discriminador={LEARNING_RATE:.5f}")
 
     # Función de pérdida
     criterion = nn.BCELoss()
@@ -184,19 +183,27 @@ def train_gan(generator, discriminator, dataloader, model_name, epochs=NUM_EPOCH
             batch_size = real_imgs.shape[0]
             real_imgs = real_imgs.to(device)
 
-            # Etiquetas
-            real_label = torch.ones(batch_size, device=device)
-            fake_label = torch.zeros(batch_size, device=device)
+            # Etiquetas con label smoothing para DC-GAN
+            if model_name == "DC-GAN":
+                # Label smoothing: real=0.9, fake=0.1
+                real_label = torch.ones(batch_size, device=device) * 0.9
+                fake_label = torch.ones(batch_size, device=device) * 0.1
+            else:
+                real_label = torch.ones(batch_size, device=device)
+                fake_label = torch.zeros(batch_size, device=device)
 
             # ============ Entrenar Discriminador ============
             discriminator.zero_grad()
 
-            # Pérdida con imágenes reales
+            # Pérdida con imágenes reales (con ruido para estabilidad en DC-GAN)
             if model_name == "MLP-GAN":
                 real_imgs_flat = real_imgs.view(batch_size, -1)
                 output_real = discriminator(real_imgs_flat).view(-1)
             else:
-                output_real = discriminator(real_imgs).view(-1)
+                # Añadir ruido mínimo para estabilidad
+                noise_factor = 0.05 * torch.randn_like(real_imgs)
+                real_imgs_noisy = real_imgs + noise_factor
+                output_real = discriminator(real_imgs_noisy).view(-1)
 
             loss_d_real = criterion(output_real, real_label)
 
@@ -220,8 +227,8 @@ def train_gan(generator, discriminator, dataloader, model_name, epochs=NUM_EPOCH
             loss_d.backward()
             optim_d.step()
 
-            # ============ Entrenar Generador (Múltiples pasos para DC-GAN) ============
-            generator_steps = 2 if model_name == "DC-GAN" else 1
+            # ============ Entrenar Generador ============
+            generator_steps = 1  # Balanceado para ambos modelos
 
             for _ in range(generator_steps):
                 generator.zero_grad()
@@ -284,6 +291,65 @@ def train_gan(generator, discriminator, dataloader, model_name, epochs=NUM_EPOCH
             fake_imgs = fake_imgs.view(-1, 1, 28, 28)
 
     return g_losses, d_losses, fake_imgs
+
+
+def evaluate_generator_quality(generator, model_name, num_samples=1000):
+    """Evalúa la calidad del generador con métricas básicas"""
+    generator.eval()
+    
+    # Generar muestras
+    with torch.no_grad():
+        samples = []
+        for i in range(0, num_samples, BATCH_SIZE):
+            batch_size = min(BATCH_SIZE, num_samples - i)
+            noise = torch.randn(batch_size, Z_DIM, device=device)
+            
+            if model_name == "DC-GAN":
+                noise = noise.view(batch_size, Z_DIM, 1, 1)
+            
+            fake_imgs = generator(noise)
+            if model_name == "MLP-GAN":
+                fake_imgs = fake_imgs.view(batch_size, 1, IMAGE_SIZE, IMAGE_SIZE)
+            
+            samples.append(fake_imgs.cpu())
+        
+        samples = torch.cat(samples, dim=0)[:num_samples]
+    
+    # Calcular métricas básicas
+    samples_flat = samples.view(num_samples, -1)
+    
+    # 1. Diversidad (distancia promedio entre muestras)
+    distances = torch.cdist(samples_flat, samples_flat)
+    mean_distance = distances.mean().item()
+    
+    # 2. Varianza de píxeles
+    pixel_variance = samples.var().item()
+    
+    # 3. Rango de valores
+    min_val, max_val = samples.min().item(), samples.max().item()
+    
+    # 4. Detectar posible colapso de modo
+    # Contar muestras muy similares
+    threshold = 0.1
+    similar_pairs = (distances < threshold).sum().item() - num_samples  # Excluir diagonal
+    collapse_score = similar_pairs / (num_samples * (num_samples - 1))
+    
+    metrics = {
+        'diversidad': mean_distance,
+        'varianza_pixeles': pixel_variance,
+        'rango_valores': (min_val, max_val),
+        'colapso_modo': collapse_score,
+        'calidad_score': mean_distance * pixel_variance  # Métrica combinada
+    }
+    
+    print(f"\n📊 Métricas de calidad para {model_name}:")
+    print(f"   Diversidad: {metrics['diversidad']:.4f}")
+    print(f"   Varianza píxeles: {metrics['varianza_pixeles']:.4f}")
+    print(f"   Rango valores: [{metrics['rango_valores'][0]:.2f}, {metrics['rango_valores'][1]:.2f}]")
+    print(f"   Score colapso modo: {metrics['colapso_modo']:.4f}")
+    print(f"   Score calidad combinado: {metrics['calidad_score']:.4f}")
+    
+    return metrics, samples
 
 
 def save_images(images, model_name, num_images=10):
@@ -355,6 +421,9 @@ def main():
     # Guardar resultados MLP-GAN
     save_images(mlp_fake_imgs, "MLP-GAN")
     plot_losses(mlp_g_losses, mlp_d_losses, "MLP-GAN")
+    
+    # Evaluar calidad MLP-GAN
+    mlp_metrics, _ = evaluate_generator_quality(mlp_gen, "MLP-GAN")
 
     # ================ ENTRENAR DC-GAN ================
     print("\n" + "=" * 50)
@@ -383,6 +452,9 @@ def main():
     # Guardar resultados DC-GAN
     save_images(dc_fake_imgs, "DC-GAN")
     plot_losses(dc_g_losses, dc_d_losses, "DC-GAN")
+    
+    # Evaluar calidad DC-GAN
+    dc_metrics, _ = evaluate_generator_quality(dc_gen, "DC-GAN")
 
     # ================ COMPARACIÓN FINAL ================
     print("\n" + "=" * 50)
@@ -423,6 +495,42 @@ def main():
     mlp_g_std = np.std(mlp_g_losses[-10:])
     dc_g_std = np.std(dc_g_losses[-10:])
     print(f"Estabilidad G (std últimas 10): MLP={mlp_g_std:.4f}, DC={dc_g_std:.4f}")
+    
+    # Tabla de comparación de métricas
+    print("\n🏆 TABLA DE COMPARACIÓN:")
+    print("=" * 70)
+    print(f"{'Métrica':<20} {'MLP-GAN':<15} {'DC-GAN':<15} {'Ganador':<15}")
+    print("-" * 70)
+    
+    # Diversidad (mayor es mejor)
+    mlp_div = mlp_metrics['diversidad']
+    dc_div = dc_metrics['diversidad']
+    div_winner = "DC-GAN" if dc_div > mlp_div else "MLP-GAN"
+    print(f"{'Diversidad':<20} {mlp_div:<15.4f} {dc_div:<15.4f} {div_winner:<15}")
+    
+    # Varianza píxeles (mayor es mejor)
+    mlp_var = mlp_metrics['varianza_pixeles']
+    dc_var = dc_metrics['varianza_pixeles']
+    var_winner = "DC-GAN" if dc_var > mlp_var else "MLP-GAN"
+    print(f"{'Varianza píxeles':<20} {mlp_var:<15.4f} {dc_var:<15.4f} {var_winner:<15}")
+    
+    # Colapso modo (menor es mejor)
+    mlp_collapse = mlp_metrics['colapso_modo']
+    dc_collapse = dc_metrics['colapso_modo']
+    collapse_winner = "DC-GAN" if dc_collapse < mlp_collapse else "MLP-GAN"
+    print(f"{'Colapso modo':<20} {mlp_collapse:<15.4f} {dc_collapse:<15.4f} {collapse_winner:<15}")
+    
+    # Calidad combinada (mayor es mejor)
+    mlp_quality = mlp_metrics['calidad_score']
+    dc_quality = dc_metrics['calidad_score']
+    quality_winner = "DC-GAN" if dc_quality > mlp_quality else "MLP-GAN"
+    print(f"{'Calidad combinada':<20} {mlp_quality:<15.4f} {dc_quality:<15.4f} {quality_winner:<15}")
+    
+    # Estabilidad entrenamiento (menor es mejor)
+    stability_winner = "DC-GAN" if dc_g_std < mlp_g_std else "MLP-GAN"
+    print(f"{'Estabilidad':<20} {mlp_g_std:<15.4f} {dc_g_std:<15.4f} {stability_winner:<15}")
+    
+    print("=" * 70)
 
     # Guardar modelos entrenados
     torch.save(mlp_gen.state_dict(), 'results/mlp_generator.pth')
